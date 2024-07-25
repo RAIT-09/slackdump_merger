@@ -10,85 +10,81 @@ class Merger():
         self.new_dir = new_dir
         self.merged_dir = merged_dir
 
-        self.old_channels = self._parse_file(old_dir + "/channels.json")
-        self.new_channels = self._parse_file(new_dir + "/channels.json")
-        self.merged_channels = self._merge_files(self.old_channels, self.new_channels)
-        self._save_file("channels.json", self.merged_channels)
+        self.file_types = ["channels", "dms", "groups", "mpims", "users"]
+        self.data = {}
+        self.old_data = {}
+        self.new_data = {}
 
-        self.old_dms = self._parse_file(old_dir + "/dms.json")
-        self.new_dms = self._parse_file(new_dir + "/dms.json")
-        self.merged_dms = self._merge_files(self.old_dms, self.new_dms)
-        self._save_file("dms.json", self.merged_dms)
+        for file_type in self.file_types:
+            old_file = self._parse_file(f"{self.old_dir}/{file_type}.json")
+            new_file = self._parse_file(f"{self.new_dir}/{file_type}.json")
+            self.old_data[file_type] = old_file
+            self.new_data[file_type] = new_file
+            self.data[file_type] = self._merge_files(old_file, new_file)
+            self._save_file(f"{file_type}.json", self.data[file_type])
 
-        self.old_groups = self._parse_file(old_dir + "/groups.json")
-        self.new_groups = self._parse_file(new_dir + "/groups.json")
-        self.merged_groups = self._merge_files(self.old_groups, self.new_groups)
-        self._save_file("groups.json", self.merged_groups)
+        self._merge_chats()
 
-        self.old_mpims = self._parse_file(old_dir + "/mpims.json")
-        self.new_mpims = self._parse_file(new_dir + "/mpims.json")
-        self.merged_mpims = self._merge_files(self.old_mpims, self.new_mpims)
-        self._save_file("mpims.json", self.merged_mpims)
-
-        self.old_users = self._parse_file(old_dir + "/users.json")
-        self.new_users = self._parse_file(new_dir + "/users.json")
-        self.merged_users = self._merge_files(self.old_users, self.new_users)
-        self._save_file("users.json", self.merged_users)
-
-        self.merge_chats()
-
-    def _key_func(self, elem):
+    def _key_func(self, elem) -> str:
         return elem["id"]
 
-    def _parse_file(self, path: str) -> list:
-        with open(path, "r", encoding="utf-8") as file:
-            elements = json.load(file)
-            return elements
-
     def _merge_files(self, old_elements: list, new_elements: list) -> list:
+        """
+        Merge two files.
+        If IDs in old file doesn't exist on new file, it is a deleted channel, so insert it into newer file.
+        """
         merged_elements = deepcopy(new_elements)
+        new_elements_ids = {el["id"] for el in new_elements}
+
         for old_el in old_elements:
-            exists = False
-            for new_el in new_elements:
-                if old_el["id"] == new_el["id"]: exists = True
-            if not exists:
-                insert_idx = bisect.bisect_left([self._key_func(ch) for ch in merged_elements], self.key_func(old_el))
+            if old_el["id"] not in new_elements_ids:
+                insert_idx = bisect.bisect_left(
+                    [self._key_func(ch) for ch in merged_elements],
+                    self._key_func(old_el)
+                )
                 merged_elements.insert(insert_idx, old_el)
+
         return merged_elements
 
-    def merge_chats(self):
+    def _merge_chats(self) -> None:
+        """
+        Copy chat files into appropriate directories.
+        """
         new_dir_list = [f for f in os.listdir(self.new_dir) if os.path.isdir(os.path.join(self.new_dir, f))]
         old_dir_list = [f for f in os.listdir(self.old_dir) if os.path.isdir(os.path.join(self.old_dir, f))]
         chats = {}
-        for ch in self.new_channels:
-            if ch["name"] in new_dir_list:
-                chats[ch["id"]] = {"new_name":ch["name"]}
-        for dm in self.new_dms:
-            if dm["id"] in new_dir_list:
-                chats[dm["id"]] = {"new_name":dm["id"]}
-        for mpim in self.new_mpims:
-            if mpim["name"] in new_dir_list:
-                chats[mpim["id"]] = {"new_name":mpim["name"]}
-        for ch in self.old_channels:
-            if ch["name"] in old_dir_list:
-                chats[ch["id"]] |= {"old_name":ch["name"]}
-        for dm in self.old_dms:
-            if dm["id"] in old_dir_list:
-                chats[dm["id"]] |= {"old_name":dm["id"]}
-        for mpim in self.old_mpims:
-            if mpim["name"] in old_dir_list:
-                chats[mpim["id"]] |= {"old_name":mpim["name"]}
 
-        for id, dir in chats.items():
-            if not "old_name" in dir:
-                # new channel
-                shutil.copytree(self.new_dir + "/" + dir["new_name"], self.merged_dir + "/" + dir["new_name"])
-            elif not "new_name" in dir:
-                # removed channel
-                shutil.copytree(self.old_dir + "/" + dir["old_name"], self.merged_dir + "/" + dir["old_name"])
+        def add_chat(entries, dir_list, source_type, key):
+            for entry in entries:
+                if entry[key] in dir_list:
+                    if entry["id"] not in chats:
+                        chats[entry["id"]] = {}
+                    chats[entry["id"]] |= {f"{source_type}_name":entry[key]}
+
+        add_chat(self.new_data["channels"], new_dir_list, "new", "name")
+        add_chat(self.new_data["dms"], new_dir_list, "new", "id")
+        add_chat(self.new_data["mpims"], new_dir_list, "new", "name")
+        add_chat(self.old_data["channels"], old_dir_list, "old", "name")
+        add_chat(self.old_data["dms"], old_dir_list, "old", "id")
+        add_chat(self.old_data["mpims"], old_dir_list, "old", "name")
+
+        for chat_id, dirs in chats.items():
+            old_name = dirs.get("old_name")
+            new_name = dirs.get("new_name")
+            if not old_name:
+                # New channel
+                shutil.copytree(f"{self.new_dir}/{new_name}", f"{self.merged_dir}/{new_name}")
+            elif not new_name:
+                # Removed channel
+                shutil.copytree(f"{self.old_dir}/{old_name}", f"{self.merged_dir}/{old_name}")
             else:
-                shutil.copytree(self.old_dir + "/" + dir["old_name"], self.merged_dir + "/" + dir["new_name"])
-                shutil.copytree(self.new_dir + "/" + dir["new_name"], self.merged_dir + "/" + dir["new_name"], dirs_exist_ok = True)
+                # Merged channel
+                shutil.copytree(f"{self.old_dir}/{old_name}", f"{self.merged_dir}/{new_name}")
+                shutil.copytree(f"{self.new_dir}/{new_name}", f"{self.merged_dir}/{new_name}", dirs_exist_ok = True)
+
+    def _parse_file(self, path: str) -> list:
+        with open(path, "r", encoding="utf-8") as file:
+            return json.load(file)
 
     def _save_file(self, file_name: str, elements: list):
         with open(self.merged_dir + "/" + file_name, "w", encoding="utf-8") as file:
